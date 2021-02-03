@@ -5,8 +5,13 @@ namespace CosmosDataGenerator
 {
     public class Location
     {
-        [JsonProperty("LocationID")]
+
+        [JsonProperty("id")]
         public string LocationID { get; set; }
+        [JsonProperty("partitionKey")]
+        public string PartitionKey { get; set; }
+
+        public string DealerID { get; set; }
         public string Name { get; set; }
         public IList<Item> Items { get; set; }
     }
