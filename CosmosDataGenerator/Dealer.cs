@@ -5,7 +5,7 @@ namespace CosmosDataGenerator
 {
     public class Dealer
     {
-        [JsonProperty("DealerID")]
+        [JsonProperty("id")]
         public string DealerID { get; set; }
         public string Name { get; set; }
         public IList<Location> Locations { get; set; }

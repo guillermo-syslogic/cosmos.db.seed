@@ -3,6 +3,7 @@ using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace CosmosDataGenerator
@@ -10,31 +11,36 @@ namespace CosmosDataGenerator
     class Program
     {
         private static readonly string databaseId = "RentalReservations";
-        private static readonly string readHeavyId = "Reservations";
+        private static readonly string containerId = "Locations";
+        private static readonly bool insertData = true;
+        private static readonly bool createContainer = true;
+
+        private static IConfigurationRoot configuration;
 
         static async Task Main(string[] args)
         {
             try
             {
-                IConfigurationRoot configuration = new ConfigurationBuilder()
-                    .AddJsonFile("appsettings.json")
-                    .Build();
 
-                string connectionString = configuration["CosmosConnectionString"];
-
-                if (string.IsNullOrEmpty(connectionString))
+                var dealers = GenerateData(new Random().Next(5, 10));
+                
+                if(createContainer)
                 {
-                    throw new ArgumentNullException("Please specify a connection string in the appSettings.json file");
+                    using (CosmosClient client = new CosmosClient(GetCosmosConnectionString()))
+                    {
+                        await CreateDBContainer(client);
+                    }
                 }
 
-                using (CosmosClient client = new CosmosClient(connectionString))
+                if (insertData)
                 {
-                    var dataContainer = await CreateDBContainer(client);
-                    await GenerateData(dataContainer, 100000);
-                    // await QueryDataWithinPartition(dataContainer);
-                    // await QueryDataWithinPartitionWithFilter(dataContainer);
-                    // await QueryDataWithCrossPartitionQuery(dataContainer);
-                };
+                    using (CosmosClient client = new CosmosClient(GetCosmosConnectionString()))
+                    {
+                        var dataContainer = client.GetContainer(databaseId, containerId);
+                        //var dataContainer = await CreateDBContainer(client);
+                        await InsertData(dataContainer, dealers);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -43,23 +49,44 @@ namespace CosmosDataGenerator
             }
         }
 
+        private static string GetCosmosConnectionString()
+        {
+            configuration = new ConfigurationBuilder()
+                .AddJsonFile("appsettings.json")
+                .Build();
+
+            string connectionString = configuration["CosmosConnectionString"];
+
+            if (string.IsNullOrEmpty(connectionString))
+            {
+                throw new ArgumentNullException("Please specify a connection string in the appSettings.json file");
+            }
+
+            return connectionString;
+        }
+
+
+        private static async Task CreateDB(CosmosClient client)
+        {
+            // Set up a database
+            Microsoft.Azure.Cosmos.Database database = await client.CreateDatabaseIfNotExistsAsync(databaseId);
+        }
+
         private static async Task<Container> CreateDBContainer(CosmosClient client)
         {
             ContainerResponse dataContainer = null;
 
             try
             {
-                // Set up a database
-                Microsoft.Azure.Cosmos.Database database = await client.CreateDatabaseIfNotExistsAsync(databaseId);
+
+                var database = client.GetDatabase(databaseId);
 
                 // Container and Throughput Properties
-                ContainerProperties containerProperties = new ContainerProperties(readHeavyId, "/Dealers/Locations/LocationID");
+                ContainerProperties containerProperties = new ContainerProperties(containerId, "/partitionKey");
                 ThroughputProperties throughputProperties = ThroughputProperties.CreateAutoscaleThroughput(20000);
 
                 // Create a read heavy environment
-                dataContainer = await database.CreateContainerAsync(
-                    containerProperties,
-                    throughputProperties);              
+                dataContainer = await database.CreateContainerAsync(containerProperties, throughputProperties);
             }
             catch (CosmosException ce)
             {
@@ -74,45 +101,24 @@ namespace CosmosDataGenerator
             return dataContainer;
         }
 
-        private static async Task GenerateData(Container readContainer, int itemsToGenerate)
+        private static async Task InsertData(Container dataContainer, IEnumerable<Dealer> dealers)
         {
             try
             {
-                // Generate Data
-
-                var seedItem = new Faker<Item>()
-                    .RuleFor(i => i.ItemID, (fake) => Guid.NewGuid().ToString())
-                    .RuleFor(i => i.Name, x => x.Commerce.ProductName());
-
-                var seedLocations = new Faker<Location>()
-                    .RuleFor(i => i.LocationID, x => Guid.NewGuid().ToString())
-                    .RuleFor(i => i.Name, x => x.Address.City())
-                    .RuleFor(i => i.Items, x => seedItem.Generate(new Random().Next(3,10)));
-                   
-                var seedDealer = new Faker<Dealer>()
-                    .RuleFor(d => d.DealerID, (fake) => Guid.NewGuid().ToString())
-                    .RuleFor(d => d.Name, (fake) => fake.PickRandom(new List<string> { 
-                        "Wheel & sprocket", 
-                        "mountain goats", 
-                        "rams & rims", 
-                        "down we go", 
-                        "bouncy bouncy", 
-                        "trails & rails", 
-                        "fat wheels", 
-                        "tour du brek", 
-                        "Brekenridge Adventures", 
-                        "Backpackers" }))
-                    .RuleFor(d => d.Locations, x => seedLocations.Generate(new Random().Next(1, 5)))
-                    .Generate(new Random().Next(5, 20));
 
                 // Add to read container
-                foreach (var dealer in seedDealer)
+                foreach (var dealer in dealers)
                 {
-                    await readContainer.CreateItemAsync(
-                        dealer,
-                        new PartitionKey(dealer.Locations.GetEnumerator().Current.LocationID));
-                    Console.WriteLine($"DealerId: {dealer.DealerID}");
-                }               
+                    foreach (var location in dealer.Locations)
+                    {
+                        location.DealerID = dealer.DealerID;
+                        location.PartitionKey = $"{dealer.DealerID}:{location.LocationID}";
+
+                        await dataContainer.CreateItemAsync(
+                            location,
+                            new PartitionKey(location.PartitionKey));
+                    }
+                }
             }
             catch (CosmosException ce)
             {
@@ -122,67 +128,88 @@ namespace CosmosDataGenerator
             {
                 Console.WriteLine($"Exception thrown: {ex.Message}");
                 throw;
-            }                      
-        }
-
-        private static async Task QueryDataWithinPartition(Container readContainer, string dealerId)
-        {
-            // Querry within a partition
-            Console.WriteLine("Searching for all locations that are in dealer...");
-            QueryDefinition dealerQuery = new QueryDefinition(
-                string.Format("SELECT * FROM Dealers d WHERE d.DealerID = '{dealerId}'", dealerId));
-
-            FeedIterator<Dealer> dealerIterator = readContainer.GetItemQueryIterator<Dealer>(
-                dealerQuery);
-
-            while (dealerIterator.HasMoreResults)
-            {
-                FeedResponse<Dealer> dealerResponse = await dealerIterator.ReadNextAsync();
-                foreach (var dealer in dealerResponse)
-                {
-                    PrintDealer(dealer);
-                }
-
-                Console.WriteLine($"Total of {dealerResponse.Count} results");
-                Console.WriteLine($"This query cost: {dealerResponse.RequestCharge} RU's");
-                Console.WriteLine("=======================================================");
-                Console.WriteLine();
-            }           
-        }
-
-        private static async Task QueryDataWithinPartitionWithFilter(Container readContainer, string locationId)
-        {
-            // Perform a range query within a partition
-            Console.WriteLine("Searching for dealer that has a given location by id");
-            QueryDefinition locationFilterQuery = new QueryDefinition(
-                string.Format("SELECT * FROM Dealers d WHERE d.Locations.LocationID = {locationId}", locationId));
-
-            FeedIterator<Dealer> locationIterator = readContainer.GetItemQueryIterator<Dealer>(
-                locationFilterQuery);
-
-            while (locationIterator.HasMoreResults)
-            {
-                FeedResponse<Dealer> locationFilterResponse = await locationIterator.ReadNextAsync();
-                foreach (var dealer in locationFilterResponse)
-                {
-                    PrintDealer(dealer);
-                }
-
-                Console.WriteLine($"Total of {locationFilterResponse.Count} results");
-                Console.WriteLine($"This query cost: {locationFilterResponse.RequestCharge} RU's");
-                Console.WriteLine("=======================================================");
-                Console.WriteLine();
             }
+
+            return;
         }
 
-        private static void PrintDealer(Dealer dealer)
+        private static IEnumerable<Dealer> GenerateData(int itemsToGenerate)
         {
-            Console.WriteLine("Hotel result");
-            Console.WriteLine("====================");
-            Console.WriteLine($"Id: {dealer.DealerID}");
-            Console.WriteLine($"Name: {dealer.Name}");
-            Console.WriteLine($"Locations: {dealer.Locations}");
-            Console.WriteLine("====================");
+
+            var bikeNames = new List<string>
+            {
+                "Stache 7",
+                "Superfly 20",
+                "T80 24-Speed Midstep BLX",
+                "Verve 3 Women's",
+                "Conduit+",
+                "C720+ SE",
+                "Domane ALR 3",
+                "Domane ALR 4",
+                "CrossRip 1",
+                "Domane S 4",
+                "Farley EX 9.8",
+                "Ibiza 21-Speed Midstep BLX"
+            };
+
+
+            var categories = new List<string>
+            {
+                "Road bikes",
+                "Hybrid bikes",
+                "Mountain bikes",
+                "Electric bikes",
+                "Diamant bikes",
+                "Electra bikes",
+                "Kids' bikes",
+                "City bikes"
+            };
+
+            var fakeItems = new Faker<Item>()
+                .RuleFor(i => i.ItemID, (x) => Guid.NewGuid().ToString())
+                .RuleFor(i => i.Sku, x => new Randomizer().Replace("##-######"))
+                .RuleFor(i => i.Model, x => x.PickRandom(categories))
+                .RuleFor(i => i.Name, x => x.PickRandom(bikeNames));
+
+
+            var fakeLocations = new Faker<Location>()
+                .RuleFor(i => i.LocationID, x => Guid.NewGuid().ToString())
+                .RuleFor(i => i.Name, x => x.Address.City())
+                .RuleFor(i => i.Items, x => fakeItems.Generate(new Random().Next(3, 10)));
+
+            var fakeDealers = new Faker<Dealer>()
+                .RuleFor(d => d.DealerID, (x) => Guid.NewGuid().ToString())
+                .RuleFor(d => d.Name, (x) => x.PickRandom(new List<string> {
+                        "Wheel & sprocket",
+                        "mountain goats",
+                        "rams & rims",
+                        "down we go",
+                        "bouncy bouncy",
+                        "trails & rails",
+                        "fat wheels",
+                        "tour du brek",
+                        "Brekenridge Adventures",
+                        "Backpackers" }))
+                .RuleFor(d => d.Locations, x => fakeLocations.Generate(new Random().Next(1, 5)))
+                .Generate(itemsToGenerate);
+
+            foreach (var dealer in fakeDealers)
+            {
+
+                Console.WriteLine($"DealerId: {dealer.DealerID}");
+                foreach (var location in dealer.Locations)
+                {
+                    Console.WriteLine($"\tLocationId: {location.LocationID}");
+                }
+
+                //var dealerJSON = JsonSerializer.Serialize(fakeDealers);
+                //Console.WriteLine(dealerJSON);
+                //Console.ReadKey();
+
+            }
+
+            return fakeDealers;
         }
+
     }
 }
