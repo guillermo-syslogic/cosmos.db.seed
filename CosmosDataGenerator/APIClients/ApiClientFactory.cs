@@ -14,18 +14,20 @@ namespace Ascend.Services.ApiClients
 
         public T Create<T>() where T : IApiClient
         {
-            return _container.GetInstance<T>();
+            return _container.GetService<T>();
         }
 
         public T Create<T>(Guid dealerId) where T : IStratusDealerClient
         {
-            return _container.With(dealerId).GetInstance<T>();
+            return _container.GetService<T>();
+            //return _container.With(dealerId).GetInstance<T>();
         }
 
         public T Create<T>(Guid dealerId, Guid locationId) where T : IStratusLocationClient
         {
             var locationInfo = new LocationInformation(dealerId, locationId);
-            return _container.With(locationInfo).GetInstance<T>();
+            return _container.GetService<T>();
+            //return _container.With(locationInfo).GetInstance<T>();
         }
     }
 }
