@@ -16,6 +16,7 @@ namespace CosmosDataGenerator
         private static readonly bool createContainer = true;
 
         private static IConfigurationRoot configuration;
+        private static DependencyExtensions _extensions = new DependencyExtensions();
 
         static async Task Main(string[] args)
         {
@@ -44,9 +45,11 @@ namespace CosmosDataGenerator
             }
             catch (Exception ex)
             {
+                _extensions.Dispose();
                 Console.WriteLine($"Exception throw: {ex.Message}");
                 throw;
             }
+
         }
 
         private static string GetCosmosConnectionString()
